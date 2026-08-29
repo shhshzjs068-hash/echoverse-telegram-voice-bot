@@ -48,6 +48,8 @@ class User(Base):
     referral_code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     referral_count: Mapped[int] = mapped_column(Integer, default=0)
 
+    last_daily_bonus_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False)  # blocked the bot
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)  # banned by admin
 

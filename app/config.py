@@ -85,7 +85,7 @@ class Settings:
     )
 
     # Economy
-    referral_reward: int = field(default_factory=lambda: _get_int("REFERRAL_REWARD", 10))
+    referral_reward: int = field(default_factory=lambda: _get_int("REFERRAL_REWARD", 1))
     welcome_credits: int = field(default_factory=lambda: _get_int("WELCOME_CREDITS", 5))
     referral_qualify_generations: int = field(
         default_factory=lambda: _get_int("REFERRAL_QUALIFY_GENERATIONS", 1)
@@ -96,6 +96,7 @@ class Settings:
     min_charge_credits: int = field(default_factory=lambda: _get_int("MIN_CHARGE_CREDITS", 1))
     clone_credits_cost: int = field(default_factory=lambda: _get_int("CLONE_CREDITS_COST", 20))
     preview_credits_cost: int = field(default_factory=lambda: _get_int("PREVIEW_CREDITS_COST", 1))
+    daily_bonus_credits: int = field(default_factory=lambda: _get_int("DAILY_BONUS_CREDITS", 5))
 
     # Limits
     max_text_length: int = field(default_factory=lambda: _get_int("MAX_TEXT_LENGTH", 1000))

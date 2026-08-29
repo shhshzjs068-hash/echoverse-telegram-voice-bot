@@ -5,7 +5,7 @@ User.credits_balance directly anywhere else in the codebase.
 """
 from __future__ import annotations
 
-import math
+import datetime as dt
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,14 +13,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import CreditTransaction, User
 
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+
 
 class InsufficientCreditsError(Exception):
     pass
 
 
 def calculate_generation_cost(text: str) -> int:
-    raw_cost = len(text) * settings.credits_per_character
-    return max(settings.min_charge_credits, math.ceil(raw_cost))
+    """Flat per-generation cost regardless of text length - a 5-second and
+    a 2-minute generation both cost the same settings.min_charge_credits."""
+    return settings.min_charge_credits
 
 
 async def get_balance(session: AsyncSession, telegram_user_id: int) -> int:
@@ -189,3 +192,58 @@ async def get_transaction_history(
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+# ------------------------------------------------------------------ daily bonus
+
+def _current_bonus_period_start(now_utc: dt.datetime) -> dt.datetime:
+    """The bonus 'day' resets at 12:00 IST, not midnight UTC. Returns the
+    UTC timestamp of the most recent 12:00 IST boundary at or before now."""
+    now_ist = now_utc.astimezone(IST)
+    period_start_ist = now_ist.replace(hour=12, minute=0, second=0, microsecond=0)
+    if now_ist < period_start_ist:
+        period_start_ist -= dt.timedelta(days=1)
+    return period_start_ist.astimezone(dt.timezone.utc)
+
+
+def next_daily_bonus_reset(now_utc: dt.datetime) -> dt.datetime:
+    """UTC timestamp of the next 12:00 IST reset after now."""
+    return _current_bonus_period_start(now_utc) + dt.timedelta(days=1)
+
+
+class DailyBonusAlreadyClaimedError(Exception):
+    def __init__(self, next_reset_at: dt.datetime) -> None:
+        self.next_reset_at = next_reset_at
+        super().__init__("Daily bonus already claimed for this period")
+
+
+async def claim_daily_bonus(session: AsyncSession, *, telegram_user_id: int) -> int:
+    """Grant the daily bonus if the user hasn't claimed it since the last
+    12:00 IST reset. Raises DailyBonusAlreadyClaimedError otherwise. Row-locked
+    like the other credit mutations, so two concurrent taps of the claim
+    button can't both succeed. Returns the new balance."""
+    now = dt.datetime.now(dt.timezone.utc)
+    period_start = _current_bonus_period_start(now)
+
+    user = await session.get(User, telegram_user_id, with_for_update=True)
+    if user is None:
+        raise ValueError("Unknown user")
+
+    if user.last_daily_bonus_at is not None:
+        last_claim = user.last_daily_bonus_at
+        if last_claim.tzinfo is None:
+            last_claim = last_claim.replace(tzinfo=dt.timezone.utc)
+        if last_claim >= period_start:
+            await session.rollback()
+            raise DailyBonusAlreadyClaimedError(next_daily_bonus_reset(now))
+
+    user.last_daily_bonus_at = now
+    await _apply_delta(
+        session,
+        user=user,
+        amount=settings.daily_bonus_credits,
+        transaction_type="daily_bonus",
+        description="Daily bonus",
+    )
+    await session.commit()
+    return user.credits_balance

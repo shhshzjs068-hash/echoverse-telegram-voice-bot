@@ -4,6 +4,7 @@ import logging
 import secrets
 from contextlib import asynccontextmanager
 
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings
@@ -29,7 +30,25 @@ async def init_db() -> None:
     """Create tables if they don't already exist. Safe to call on every startup."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _ensure_column(conn, "users", "last_daily_bonus_at")
     logger.info("Database initialized")
+
+
+async def _ensure_column(conn, table: str, column: str) -> None:
+    """create_all only creates missing tables, never alters existing ones -
+    so a new column added to an ORM model (like last_daily_bonus_at) never
+    reaches a database that's already running in production without a real
+    migration tool. This is a minimal stand-in: check if the column exists
+    and ALTER TABLE to add it if not. Idempotent, safe to run every boot."""
+
+    def _has_column(sync_conn) -> bool:
+        return column in [c["name"] for c in inspect(sync_conn).get_columns(table)]
+
+    if await conn.run_sync(_has_column):
+        return
+    col_type = "TIMESTAMP WITH TIME ZONE" if conn.dialect.name == "postgresql" else "TIMESTAMP"
+    await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+    logger.info("Added missing column %s.%s", table, column)
 
 
 @asynccontextmanager

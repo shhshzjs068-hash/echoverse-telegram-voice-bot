@@ -12,6 +12,7 @@ def main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🧬 Clone Voice", callback_data="menu:clone")],
         [InlineKeyboardButton(text="👤 My Voices", callback_data="menu:my_voices")],
         [InlineKeyboardButton(text="💰 My Tokens", callback_data="menu:credits")],
+        [InlineKeyboardButton(text="🎁 Daily Bonus", callback_data="daily:claim")],
         [InlineKeyboardButton(text="🎁 Invite & Earn", callback_data="menu:invite")],
         [InlineKeyboardButton(text="📜 History", callback_data="menu:history")],
         [InlineKeyboardButton(text="⚙️ Settings", callback_data="menu:settings")],

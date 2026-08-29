@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import datetime as dt
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database.models import User
 from app.keyboards.credits import credits_menu_kb
 from app.keyboards.main_menu import back_main_kb
@@ -20,6 +23,7 @@ _TXN_LABELS = {
     "generation_charge": "🎙 Generation",
     "refund": "↩️ Refund",
     "admin_adjustment": "🛠 Admin adjustment",
+    "daily_bonus": "🎁 Daily bonus",
 }
 
 
@@ -62,3 +66,47 @@ async def cb_credits_history(callback: CallbackQuery, session: AsyncSession, db_
         lines.append(f"{label}: {sign}{t.amount} (balance {t.balance_after}) — {t.created_at.strftime('%Y-%m-%d %H:%M')}")
     await callback.message.edit_text("\n".join(lines), reply_markup=back_main_kb())
     await callback.answer()
+
+
+def _format_countdown(delta: dt.timedelta) -> str:
+    total_minutes = max(0, int(delta.total_seconds() // 60))
+    hours, minutes = divmod(total_minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+@router.callback_query(F.data == "daily:claim")
+async def cb_daily_bonus_claim(callback: CallbackQuery, session: AsyncSession, db_user: User) -> None:
+    try:
+        new_balance = await credits_service.claim_daily_bonus(session, telegram_user_id=db_user.telegram_user_id)
+    except credits_service.DailyBonusAlreadyClaimedError as exc:
+        remaining = exc.next_reset_at - dt.datetime.now(dt.timezone.utc)
+        await callback.answer(
+            f"You've already claimed today's bonus. Next one in {_format_countdown(remaining)} "
+            f"(resets 12:00 PM IST).",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer(f"🎁 +{settings.daily_bonus_credits} tokens! Balance: {new_balance}", show_alert=True)
+    await callback.message.edit_text(_credits_text(db_user), reply_markup=credits_menu_kb())
+
+
+@router.message(Command("daily"))
+async def cmd_daily_bonus_claim(message: Message, session: AsyncSession, db_user: User) -> None:
+    try:
+        new_balance = await credits_service.claim_daily_bonus(session, telegram_user_id=db_user.telegram_user_id)
+    except credits_service.DailyBonusAlreadyClaimedError as exc:
+        remaining = exc.next_reset_at - dt.datetime.now(dt.timezone.utc)
+        await message.answer(
+            f"⏳ You've already claimed today's bonus. Next one in {_format_countdown(remaining)} "
+            f"(resets 12:00 PM IST).",
+            reply_markup=back_main_kb(),
+        )
+        return
+
+    await message.answer(
+        f"🎁 <b>Daily bonus claimed!</b>\n\n+{settings.daily_bonus_credits} tokens · Balance: {new_balance} tokens",
+        reply_markup=credits_menu_kb(),
+    )

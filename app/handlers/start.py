@@ -12,6 +12,7 @@ from app.config import settings
 from app.database.models import User
 from app.handlers.common import MAIN_MENU_TEXT
 from app.keyboards.main_menu import main_menu_kb
+from app.services import credits as credits_service
 from app.services import referral as referral_service
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,21 @@ async def cmd_start(
         await referral_service.register_referral_if_new(
             session, new_user=db_user, referrer_id=referrer_id
         )
+
+        # Welcome bonus applies to every new user - referred or not. This
+        # used to live inside register_referral_if_new and only fired for
+        # users who arrived via a valid referral link, so anyone who just
+        # found the bot directly (or clicked a broken/self referral link)
+        # silently got zero starting tokens.
+        if settings.welcome_credits > 0:
+            await credits_service.grant_credits(
+                session,
+                telegram_user_id=db_user.telegram_user_id,
+                amount=settings.welcome_credits,
+                transaction_type="welcome_bonus",
+                description="Welcome bonus",
+            )
+
         if db_user.referred_by is not None:
             welcome = (
                 f"👋 Welcome to <b>{settings.brand_name}</b>!\n\n"

@@ -7,6 +7,7 @@ from app.keyboards.main_menu import back_main_row
 
 def credits_menu_kb() -> InlineKeyboardMarkup:
     rows = [
+        [InlineKeyboardButton(text="🎁 Daily Bonus", callback_data="daily:claim")],
         [InlineKeyboardButton(text="🎁 Invite & Earn", callback_data="menu:invite")],
         [InlineKeyboardButton(text="📜 Token History", callback_data="credits:history")],
         back_main_row(),

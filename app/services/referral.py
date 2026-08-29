@@ -65,15 +65,6 @@ async def register_referral_if_new(
         await session.rollback()
         return
 
-    if settings.welcome_credits > 0:
-        await credits_service.grant_credits(
-            session,
-            telegram_user_id=new_user.telegram_user_id,
-            amount=settings.welcome_credits,
-            transaction_type="welcome_bonus",
-            description="Welcome bonus",
-        )
-
 
 async def maybe_qualify_and_reward(
     session: AsyncSession,
