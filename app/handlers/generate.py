@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from io import BytesIO
 
@@ -32,12 +31,6 @@ logger = logging.getLogger(__name__)
 router = Router(name="generate")
 
 DEFAULT_VOICE_ID = None  # if user has never picked one, we ask them to pick first
-PROGRESS_MESSAGES = [
-    "✍️ Processing your text...",
-    "🎙 Preparing your voice...",
-    "🔊 Generating audio...",
-    "⏳ Almost ready...",
-]
 
 
 def _voice_prompt_text(voice_name: str | None) -> str:
@@ -129,16 +122,12 @@ async def on_generate_text(message: Message, session: AsyncSession, db_user: Use
 
     status_msg = await message.answer("⏳ Generating voice...")
 
-    async def _rotate_status():
-        try:
-            for line in PROGRESS_MESSAGES:
-                await asyncio.sleep(1.2)
-                await status_msg.edit_text(line)
-        except Exception:
-            pass  # message may already be deleted/edited elsewhere; not fatal
-
-    rotator = asyncio.create_task(_rotate_status())
-
+    # Single ChatActionSender loop is Telegram's own "recording voice..."
+    # indicator - it already pings every ~5s on its own. We used to *also*
+    # run a second task editing status_msg on a 1.2s timer; those extra
+    # edit_text calls competed for the same bot connection pool as the real
+    # generation request and added nothing the native indicator didn't
+    # already show, so that loop is gone.
     try:
         async with ChatActionSender.upload_voice(bot=message.bot, chat_id=message.chat.id):
             result = await voice_service.generate_speech(
@@ -149,21 +138,35 @@ async def on_generate_text(message: Message, session: AsyncSession, db_user: Use
                 volume=db_user.volume,
             )
     except VoiceAPIError as exc:
-        rotator.cancel()
         await state.clear()
         await status_msg.edit_text(f"❌ {exc}\n\nYour tokens were not charged.", reply_markup=back_main_kb())
         return
     except Exception:
         logger.exception("Unexpected error during generation")
-        rotator.cancel()
         await state.clear()
         await status_msg.edit_text(
             "❌ Something went wrong while generating your voice. Please try again.",
             reply_markup=back_main_kb(),
         )
         return
-    finally:
-        rotator.cancel()
+
+    # Deliver the audio the instant it's ready. Everything below this line
+    # (charging credits, writing history, referral bookkeeping) is
+    # accounting that the user doesn't need to wait on - it used to run
+    # *before* the audio was sent, adding one or more DB round-trips to the
+    # perceived response time for no user-facing benefit.
+    audio_file = BufferedInputFile(result.audio_bytes, filename=f"voice.{result.format}")
+    await status_msg.delete()
+    sent_audio = await message.answer_voice(audio_file) if result.format in ("ogg", "oga") else await message.answer_audio(
+        audio_file, title="Generated Voice"
+    )
+    await state.clear()
+
+    file_id = None
+    if sent_audio.voice:
+        file_id = sent_audio.voice.file_id
+    elif sent_audio.audio:
+        file_id = sent_audio.audio.file_id
 
     # Charge credits only after a successful generation.
     try:
@@ -177,18 +180,6 @@ async def on_generate_text(message: Message, session: AsyncSession, db_user: Use
         # Extremely unlikely race (balance changed mid-flight); don't withhold
         # audio the user already paid compute for generating - but do warn.
         logger.warning("Balance changed mid-generation for user %s", db_user.telegram_user_id)
-
-    audio_file = BufferedInputFile(result.audio_bytes, filename=f"voice.{result.format}")
-    await status_msg.delete()
-    sent_audio = await message.answer_voice(audio_file) if result.format in ("ogg", "oga") else await message.answer_audio(
-        audio_file, title="Generated Voice"
-    )
-
-    file_id = None
-    if sent_audio.voice:
-        file_id = sent_audio.voice.file_id
-    elif sent_audio.audio:
-        file_id = sent_audio.audio.file_id
 
     history_entry = GenerationHistory(
         telegram_user_id=db_user.telegram_user_id,
@@ -207,7 +198,6 @@ async def on_generate_text(message: Message, session: AsyncSession, db_user: Use
         f"💳 Charged: {cost} tokens · Balance: {new_balance} tokens",
         reply_markup=generate_result_kb(),
     )
-    await state.clear()
 
     # Referral qualification check (e.g. referred user's first generation).
     history_count_stmt_result = await session.execute(

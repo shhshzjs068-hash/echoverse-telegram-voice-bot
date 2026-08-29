@@ -11,7 +11,17 @@ from app.database.models import Base, User
 
 logger = logging.getLogger(__name__)
 
-engine = create_async_engine(settings.database_url, echo=False)
+# pool_size/max_overflow only apply to real DB drivers (asyncpg); SQLAlchemy
+# ignores them for aiosqlite. Without this, asyncpg's default pool (5) can
+# make concurrent users queue for a connection under load - bumped up since
+# every single Telegram update opens a session via DatabaseMiddleware.
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    pool_size=10,
+    max_overflow=20,
+    pool_pre_ping=True,
+)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
