@@ -95,6 +95,7 @@ class Settings:
     )
     min_charge_credits: int = field(default_factory=lambda: _get_int("MIN_CHARGE_CREDITS", 1))
     clone_credits_cost: int = field(default_factory=lambda: _get_int("CLONE_CREDITS_COST", 20))
+    preview_credits_cost: int = field(default_factory=lambda: _get_int("PREVIEW_CREDITS_COST", 1))
 
     # Limits
     max_text_length: int = field(default_factory=lambda: _get_int("MAX_TEXT_LENGTH", 1000))

@@ -11,7 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.database.models import User, UserVoice
+from app.services import credits as credits_service
 from app.keyboards.history import (
     delete_voice_confirm_kb,
     my_voice_detail_kb,
@@ -248,6 +250,26 @@ async def cb_voice_preview(callback: CallbackQuery, callback_data: VoiceCB, sess
             return
         # Canned preview fetch failed - fall through to generation below.
 
+    # No canned preview available - this falls back to a real, billable
+    # provider generation. It must be charged like any other generation, or
+    # it's an unlimited free-TTS loophole (tap Preview forever, no tokens
+    # spent, real Cartesia cost every time).
+    cost = settings.preview_credits_cost
+    balance = await credits_service.get_balance(session, db_user.telegram_user_id)
+    if balance < cost:
+        await callback.answer(f"Not enough tokens for a preview ({cost} needed).", show_alert=True)
+        return
+    try:
+        await credits_service.charge_credits(
+            session,
+            telegram_user_id=db_user.telegram_user_id,
+            amount=cost,
+            description=f"Preview: {voice.name}",
+        )
+    except credits_service.InsufficientCreditsError:
+        await callback.answer(f"Not enough tokens for a preview ({cost} needed).", show_alert=True)
+        return
+
     await callback.answer("Generating a quick preview...")
     try:
         result = await voice_service.generate_speech(
@@ -255,7 +277,10 @@ async def cb_voice_preview(callback: CallbackQuery, callback_data: VoiceCB, sess
             voice_id=callback_data.voice_id,
         )
     except VoiceAPIError as exc:
-        await callback.message.answer(f"❌ {exc}")
+        await credits_service.refund_credits(
+            session, telegram_user_id=db_user.telegram_user_id, amount=cost, description="Refund: preview failed"
+        )
+        await callback.message.answer(f"❌ {exc}\n\nYour tokens were refunded.")
         return
     audio_file = BufferedInputFile(result.audio_bytes, filename=f"preview.{result.format}")
     await callback.message.answer_audio(audio_file, title="Voice Preview")
@@ -357,6 +382,26 @@ async def cb_my_voice_preview(callback: CallbackQuery, callback_data: MyVoiceCB,
     if voice is None or voice.telegram_user_id != db_user.telegram_user_id:
         await callback.answer("That voice wasn't found.", show_alert=True)
         return
+
+    # A cloned voice has no canned preview clip - every tap here is a real,
+    # billable provider generation, so it must be charged like any other
+    # generation (otherwise it's unlimited free TTS on your own clone).
+    cost = settings.preview_credits_cost
+    balance = await credits_service.get_balance(session, db_user.telegram_user_id)
+    if balance < cost:
+        await callback.answer(f"Not enough tokens for a preview ({cost} needed).", show_alert=True)
+        return
+    try:
+        await credits_service.charge_credits(
+            session,
+            telegram_user_id=db_user.telegram_user_id,
+            amount=cost,
+            description=f"Preview: {voice.name}",
+        )
+    except credits_service.InsufficientCreditsError:
+        await callback.answer(f"Not enough tokens for a preview ({cost} needed).", show_alert=True)
+        return
+
     await callback.answer("Generating a quick preview...")
     try:
         result = await voice_service.generate_speech(
@@ -364,7 +409,10 @@ async def cb_my_voice_preview(callback: CallbackQuery, callback_data: MyVoiceCB,
             voice_id=voice.external_voice_id,
         )
     except VoiceAPIError as exc:
-        await callback.message.answer(f"❌ {exc}")
+        await credits_service.refund_credits(
+            session, telegram_user_id=db_user.telegram_user_id, amount=cost, description="Refund: preview failed"
+        )
+        await callback.message.answer(f"❌ {exc}\n\nYour tokens were refunded.")
         return
     audio_file = BufferedInputFile(result.audio_bytes, filename=f"preview.{result.format}")
     await callback.message.answer_audio(audio_file, title="Voice Preview")

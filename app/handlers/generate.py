@@ -120,6 +120,31 @@ async def on_generate_text(message: Message, session: AsyncSession, db_user: Use
         )
         return
 
+    # Charge tokens up front, atomically (row-locked in charge_credits), and
+    # *before* calling the provider. The old flow charged only after
+    # delivering the audio, with the earlier balance check unlocked - two
+    # concurrent requests could both pass that check before either one
+    # actually charged, and a failed post-delivery charge was just logged
+    # and ignored, letting the user keep audio they never paid for. Charging
+    # here closes that race: the row lock means a second concurrent request
+    # sees the debited balance, not the stale one.
+    try:
+        await credits_service.charge_credits(
+            session,
+            telegram_user_id=db_user.telegram_user_id,
+            amount=cost,
+            description=f"Generation: {text[:60]}",
+        )
+    except credits_service.InsufficientCreditsError:
+        await state.clear()
+        await message.answer(
+            f"❌ Not enough tokens.\n\n"
+            f"This generation needs <b>{cost}</b> tokens.\n"
+            f"Invite friends to earn more tokens!",
+            reply_markup=insufficient_credits_kb(),
+        )
+        return
+
     status_msg = await message.answer("⏳ Generating voice...")
 
     # Single ChatActionSender loop is Telegram's own "recording voice..."
@@ -138,23 +163,31 @@ async def on_generate_text(message: Message, session: AsyncSession, db_user: Use
                 volume=db_user.volume,
             )
     except VoiceAPIError as exc:
+        await credits_service.refund_credits(
+            session,
+            telegram_user_id=db_user.telegram_user_id,
+            amount=cost,
+            description="Refund: generation failed",
+        )
         await state.clear()
-        await status_msg.edit_text(f"❌ {exc}\n\nYour tokens were not charged.", reply_markup=back_main_kb())
+        await status_msg.edit_text(f"❌ {exc}\n\nYour tokens were refunded.", reply_markup=back_main_kb())
         return
     except Exception:
         logger.exception("Unexpected error during generation")
+        await credits_service.refund_credits(
+            session,
+            telegram_user_id=db_user.telegram_user_id,
+            amount=cost,
+            description="Refund: generation failed",
+        )
         await state.clear()
         await status_msg.edit_text(
-            "❌ Something went wrong while generating your voice. Please try again.",
+            "❌ Something went wrong while generating your voice. Please try again. Your tokens were refunded.",
             reply_markup=back_main_kb(),
         )
         return
 
-    # Deliver the audio the instant it's ready. Everything below this line
-    # (charging credits, writing history, referral bookkeeping) is
-    # accounting that the user doesn't need to wait on - it used to run
-    # *before* the audio was sent, adding one or more DB round-trips to the
-    # perceived response time for no user-facing benefit.
+    # Tokens are already charged - everything below is delivery + accounting.
     audio_file = BufferedInputFile(result.audio_bytes, filename=f"voice.{result.format}")
     await status_msg.delete()
     sent_audio = await message.answer_voice(audio_file) if result.format in ("ogg", "oga") else await message.answer_audio(
@@ -167,19 +200,6 @@ async def on_generate_text(message: Message, session: AsyncSession, db_user: Use
         file_id = sent_audio.voice.file_id
     elif sent_audio.audio:
         file_id = sent_audio.audio.file_id
-
-    # Charge credits only after a successful generation.
-    try:
-        await credits_service.charge_credits(
-            session,
-            telegram_user_id=db_user.telegram_user_id,
-            amount=cost,
-            description=f"Generation: {text[:60]}",
-        )
-    except credits_service.InsufficientCreditsError:
-        # Extremely unlikely race (balance changed mid-flight); don't withhold
-        # audio the user already paid compute for generating - but do warn.
-        logger.warning("Balance changed mid-generation for user %s", db_user.telegram_user_id)
 
     history_entry = GenerationHistory(
         telegram_user_id=db_user.telegram_user_id,
